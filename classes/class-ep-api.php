@@ -567,6 +567,16 @@ class EP_API {
 
 		$user = get_userdata( $post->post_author );
 
+		$get_children_args = array (
+			'post_parent' => $post_id,
+			'post_type'   => 'attachment', 
+		);
+		$post_attachments = get_children( $get_children_args );
+	
+		$post_images = array();
+		$post_videos = array();
+		$post_audios = array();
+
 		if ( $user instanceof WP_User ) {
 			$user_data = array(
 				'raw'          => $user->user_login,
@@ -591,6 +601,7 @@ class EP_API {
 		$comment_status = absint( $post->comment_status );
 		$ping_status = absint( $post->ping_status );
 		$menu_order = absint( $post->menu_order );
+		$filtered_post_content = apply_filters( 'the_content', $post->post_content );
 
 		if ( apply_filters( 'ep_ignore_invalid_dates', true, $post_id, $post ) ) {
 			if ( ! strtotime( $post_date ) || $post_date === "0000-00-00 00:00:00" ) {
@@ -610,6 +621,157 @@ class EP_API {
 			}
 		}
 
+		// Add featured media to post_images array
+		if ( has_post_thumbnail( $post_id ) ) {
+			$featured_image = get_post( get_post_thumbnail_id( $post_id ) );
+			$featured_image_details = wp_get_attachment_image_src( $featured_image->ID, 'full' );
+			$featured_image_transformed_object = array(
+				'type'      =>  'image',
+				'id'        =>  $featured_image->ID,
+				'imageURL'  =>  $featured_image_details[0],
+				'mimeType'  =>  $featured_image->post_mime_type,
+				'height'    =>  $featured_image_details[1],
+				'width'     =>  $featured_image_details[2],
+				'post_id'   =>  $post_id
+			);
+			$post_images[0] = $featured_image_transformed_object;
+		}
+			
+		// Process post attachments to get media
+		foreach ( $post_attachments as $key => $post ) {
+			$attachment_type = explode( '/', $post->post_mime_type )[0];
+	
+			switch ( $attachment_type ) {
+				case "image":
+					$image_details = wp_get_attachment_image_src( $key, 'full' );
+	
+					$image_transformed_object = array(
+						'type'      =>  $attachment_type,
+						'id'        =>  $key,
+						'imageURL'  =>  $image_details[0],
+						'mimeType'  =>  $post->post_mime_type,
+						'height'    =>  $image_details[1],
+						'width'     =>  $image_details[2],
+						'post_id'   =>  $post_id,
+					);
+	
+					if ($post->post_excerpt) {
+						$image_transformed_object[ 'caption' ] = strip_tags( $post->post_excerpt );
+					}
+	
+					$post_images[] = $image_transformed_object;
+					break;
+				case "video":
+					$video_transformed_object = array(
+						'type'      =>  $attachment_type,
+						'id'        =>  $key,
+						'url'       =>  $post->guid,
+						'mimeType'  =>  $post->post_mime_type,
+						'post_id'   =>  $post_id,
+					);
+	
+					if ( $post->post_excerpt ) {
+						$video_transformed_object[ 'caption' ] = strip_tags( $post->post_excerpt );
+					}
+	
+					$post_videos[] = $video_transformed_object;
+					break;
+				case "audio":
+					$audio_transformed_object = array(
+						'type'      =>  $attachment_type,
+						'id'        =>  $key,
+						'url'       =>  $post->guid,
+						'mimeType'  =>  $post->post_mime_type,
+						'post_id'   =>  $post_id,
+					);
+	
+					if ( $post->post_excerpt ) {
+						$audio_transformed_object[ 'caption' ] = strip_tags( $post->post_excerpt );
+					}
+	
+					$post_audios[] = $audio_transformed_object;
+					break;
+				default:
+					break;
+			}
+		}
+		
+		// Load Post content HTML
+		$dom = new DOMDocument();
+		@$dom->loadHtml( $filtered_post_content );
+	
+		$video_tags = $dom->getElementsByTagName( 'video' );
+		$image_tags = $dom->getElementsByTagName( 'img' );
+		
+		// Iterates through image tags to get images from post html
+		if ( $image_tags ) {
+			$images_map = array();
+	
+			// Prepare map used to check if images already exist
+			foreach ( $post_images as $image ) {
+				$images_map[$image->imageURL] = true;
+			}
+	
+			foreach ( $image_tags as $image_tag ) {
+				$url = $image_tag->getAttribute( 'src' );
+	
+				if ( ! $images_map[ $url ] ) {
+					$image_details = @getimagesize( $url );
+	
+					if ( $image_details ) {
+						$image_transformed_object = array(
+							'type'      =>  'image',
+							'id'        =>  null,
+							'imageURL'  =>  $url,
+							'mimeType'  =>  $image_details[ 'mime' ],
+							'height'    =>  $image_details[ 1 ],
+							'width'     =>  $image_details[ 0 ],
+							'post_id'   =>  $post_id,
+						);
+					} else {
+						$image_transformed_object = array(
+							'type'      =>  'image',
+							'id'        =>  null,
+							'imageURL'  =>  $url,
+							'post_id'   =>  $post_id,
+						);
+					}
+					
+					$post_images[] = $image_transformed_object;
+				}
+			}
+		}
+		
+		// Iterates through video tags to get videos from post html
+		foreach ( $video_tags as $video_tag ) {
+			$video_source = null;
+			$video_type = null;
+			$video_thumbnail = $video_tag->getAttribute( 'poster' );
+	
+			if ( $video_tag->hasChildNodes() ) {
+				foreach ( $video_tag->getElementsByTagName( 'source' ) as $childNode ) {
+					if ( $childNode->tagName === 'source' ) {
+						$video_source = $childNode->getAttribute( 'src' );
+						$video_type = $childNode->getAttribute( 'type' );
+					}
+				}
+	
+				if ( $video_source ) {
+					$post_videos[] = array(
+						'type'              =>  'video',
+						'id'                =>  null,
+						'url'               =>  $video_source,
+						'videoThumbnail'    =>  $video_thumbnail,
+						'post_id'           =>  $post_id,
+					);
+	
+					if ( $video_type ) {
+						$post_videos[][ 'mimeType' ] = $video_type;
+					}
+				}
+			}
+		}
+
 		// To prevent infinite loop, we don't queue when updated_postmeta
 		remove_action( 'updated_postmeta', array( EP_Sync_Manager::factory(), 'action_queue_meta_sync' ), 10 );
 
@@ -621,7 +783,7 @@ class EP_API {
 			'post_date_gmt'         => $post_date_gmt,
 			'post_title'            => $post->post_title,
 			'post_excerpt'          => $post->post_excerpt,
-			'post_content_filtered' => apply_filters( 'the_content', $post->post_content ),
+			'post_content_filtered' => $filtered_post_content,
 			'post_content'          => $post->post_content,
 			'post_status'           => $post->post_status,
 			'post_name'             => $post->post_name,
@@ -630,6 +792,9 @@ class EP_API {
 			'post_parent'           => $post->post_parent,
 			'post_type'             => $post->post_type,
 			'post_mime_type'        => $post->post_mime_type,
+			'images'                => $post_images,
+			'videos'                => $post_videos,
+			'audios'                => $post_audios,
 			'permalink'             => get_permalink( $post_id ),
 			'terms'                 => $this->prepare_terms( $post ),
 			'meta'                  => $this->prepare_meta_types( $this->prepare_meta( $post ) ), // post_meta removed in 2.4
